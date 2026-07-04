@@ -25,16 +25,21 @@ function VideoTile({
   onEnable?: () => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const hasVideo = !!stream && stream.getVideoTracks().length > 0;
   useEffect(() => {
-    if (ref.current && stream) ref.current.srcObject = stream;
-  }, [stream]);
+    const v = ref.current;
+    if (v && stream) {
+      v.srcObject = stream;
+      v.play().catch(() => {});
+    }
+  }, [stream, hasVideo]);
   return (
     <div
       className={`relative flex-1 min-w-0 rounded-2xl overflow-hidden bg-black/80 aspect-[3/4] ring-2 transition-all ${
         speaking ? "ring-green-400 shadow-[0_0_24px_-2px_rgba(74,222,128,0.7)]" : "ring-white/40"
       }`}
     >
-      {stream ? (
+      {hasVideo ? (
         <video
           ref={ref}
           data-local
@@ -51,7 +56,7 @@ function VideoTile({
         >
           <div className="text-center">
             <div className="text-3xl mb-1 animate-floaty">📷</div>
-            Tap to enable camera
+            {stream ? "Camera blocked — tap to retry" : "Tap to enable camera"}
           </div>
         </button>
       )}
@@ -69,6 +74,10 @@ export function CameraStage() {
   const [count, setCount] = useState<number | null>(null);
   const [flash, setFlash] = useState(false);
   const busy = useRef(false);
+
+  useEffect(() => {
+    if (room.mediaError) toast(room.mediaError, "error");
+  }, [room.mediaError]);
 
   const grab = useCallback(
     (index: number) => {
@@ -250,24 +259,56 @@ function RemoteTile({
   filterCss: string;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [needsTap, setNeedsTap] = useState(false);
+
+  // Video is muted so mobile always autoplays the picture; partner AUDIO plays
+  // through a separate <audio> element (voice chat). If either is blocked,
+  // show a tap-to-play overlay.
   useEffect(() => {
-    if (ref.current && stream) ref.current.srcObject = stream;
+    const v = ref.current;
+    const a = audioRef.current;
+    if (v && stream) {
+      v.srcObject = stream;
+      v.play().catch(() => setNeedsTap(true));
+    }
+    if (a && stream) {
+      a.srcObject = stream;
+      a.play().catch(() => setNeedsTap(true));
+    }
   }, [stream]);
+
+  const forcePlay = () => {
+    ref.current?.play().catch(() => {});
+    audioRef.current?.play().catch(() => {});
+    setNeedsTap(false);
+  };
+
   return (
     <div
+      onClick={needsTap ? forcePlay : undefined}
       className={`relative flex-1 min-w-0 rounded-2xl overflow-hidden bg-black/80 aspect-[3/4] ring-2 transition-all ${
         speaking ? "ring-green-400 shadow-[0_0_24px_-2px_rgba(74,222,128,0.7)]" : "ring-white/40"
       }`}
     >
       {stream ? (
-        <video
-          ref={ref}
-          data-remote
-          autoPlay
-          playsInline
-          className="w-full h-full object-cover"
-          style={{ filter: filterCss || undefined }}
-        />
+        <>
+          <video
+            ref={ref}
+            data-remote
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+            style={{ filter: filterCss || undefined }}
+          />
+          <audio ref={audioRef} autoPlay playsInline />
+          {needsTap && (
+            <button onClick={forcePlay} className="absolute inset-0 grid place-items-center bg-black/40 text-white font-cute">
+              <span className="text-center text-sm">▶️<br />tap to connect</span>
+            </button>
+          )}
+        </>
       ) : (
         <div className="w-full h-full grid place-items-center text-white/70 text-sm font-cute text-center px-3">
           <div>

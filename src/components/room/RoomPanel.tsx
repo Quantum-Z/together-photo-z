@@ -65,11 +65,11 @@ export function RoomPanel() {
               className="flex items-center gap-2 rounded-xl bg-white/50 px-3 py-2"
             >
               <span className="w-7 h-7 rounded-full brand-grad grid place-items-center text-white text-xs">
-                {(u.id === room.selfId ? "You" : u.name)[0]?.toUpperCase()}
+                {(u.name || "?")[0]?.toUpperCase()}
               </span>
               <span className="font-cute text-sm flex-1">
-                {u.id === room.selfId ? "You" : u.name}
-                {u.id === room.selfId && room.isHost ? " · host" : ""}
+                {u.id === room.selfId ? `You (${u.name})` : u.name}
+                {u.name === "Host" ? " · host" : " · invited"}
               </span>
               {u.ready && <span className="text-xs text-green-600 font-cute">ready</span>}
             </motion.div>

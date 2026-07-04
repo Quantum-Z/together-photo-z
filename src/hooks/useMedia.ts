@@ -26,33 +26,55 @@ export function useMedia() {
 
   const start = useCallback(
     async (cameraId?: string, micId?: string) => {
-      try {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-        const s = await navigator.mediaDevices.getUserMedia({
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError("This browser can't access the camera. Use Chrome/Safari over HTTPS.");
+        return null;
+      }
+      const audio = {
+        deviceId: micId ? { exact: micId } : undefined,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+      const attempts: MediaStreamConstraints[] = [
+        {
           video: {
             deviceId: cameraId ? { exact: cameraId } : undefined,
             width: { ideal: 1280 },
             height: { ideal: 720 },
             facingMode: "user",
           },
-          audio: {
-            deviceId: micId ? { exact: micId } : undefined,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-        streamRef.current = s;
-        setStream(s);
-        setReady(true);
-        setError(null);
-        await enumerate();
-        return s;
-      } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Camera/mic access denied");
-        setReady(false);
-        return null;
+          audio,
+        },
+        { video: { facingMode: "user" }, audio }, // simpler fallback
+        { video: true, audio }, // most permissive
+        { video: true, audio: true }, // last resort
+      ];
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      let lastErr: unknown;
+      for (const constraints of attempts) {
+        try {
+          const s = await navigator.mediaDevices.getUserMedia(constraints);
+          streamRef.current = s;
+          setStream(s);
+          setReady(true);
+          setError(null);
+          await enumerate();
+          return s;
+        } catch (e) {
+          lastErr = e;
+        }
       }
+      const name = lastErr instanceof DOMException ? lastErr.name : "";
+      setError(
+        name === "NotAllowedError"
+          ? "Camera/mic permission denied. Allow it in your browser settings."
+          : name === "NotReadableError"
+          ? "Camera is busy — close other apps using it and retry."
+          : "Couldn't start camera/mic. Check permissions and retry."
+      );
+      setReady(false);
+      return null;
     },
     [enumerate]
   );

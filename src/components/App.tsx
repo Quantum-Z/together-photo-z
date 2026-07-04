@@ -12,6 +12,7 @@ import { Review } from "@/components/editor/Review";
 import { Confetti } from "@/components/Confetti";
 import { SettingsSheet } from "@/components/Settings";
 import { Button } from "@/components/ui/Button";
+import { toast } from "@/components/ui/toast";
 
 export function App() {
   const room = useRoom();
@@ -23,9 +24,13 @@ export function App() {
   // Start button) — mobile browsers block getUserMedia without one.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    const forceHost = params.has("host"); // host link: ?room=CODE&host=1
+    const invited = params.has("room") && !forceHost; // invite link → guest
     const id = params.get("room") || roomCode();
-    s.set({ roomId: id });
-    room.joinRoom(id, s.userName);
+    const name = invited ? "Partner" : "Host";
+    s.set({ roomId: id, userName: name });
+    room.joinRoom(id, name);
+    if (invited) toast("You joined the room 💌", "success");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

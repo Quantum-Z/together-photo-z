@@ -19,13 +19,13 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confetti, setConfetti] = useState(false);
 
-  // join room + start media once
+  // join room once. Camera/mic is started on a user gesture (Enable Camera /
+  // Start button) — mobile browsers block getUserMedia without one.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const id = params.get("room") || roomCode();
     s.set({ roomId: id });
     room.joinRoom(id, s.userName);
-    room.startMedia();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -58,7 +58,7 @@ export function App() {
           {s.phase !== "review" ? (
             <motion.div
               key="home"
-              initial={{ opacity: 0, y: 12 }}
+              initial={false}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
               className="grid lg:grid-cols-[300px_1fr_320px] gap-4 sm:gap-5 items-start mt-3"
@@ -97,7 +97,7 @@ export function App() {
               </div>
             </motion.div>
           ) : (
-            <motion.div key="review" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3">
+            <motion.div key="review" initial={false} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3">
               <Review />
             </motion.div>
           )}

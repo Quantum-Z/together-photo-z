@@ -15,12 +15,14 @@ function VideoTile({
   label,
   speaking,
   filterCss,
+  onEnable,
 }: {
   stream: MediaStream | null;
   mirror: boolean;
   label: string;
   speaking?: boolean;
   filterCss: string;
+  onEnable?: () => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
@@ -43,12 +45,15 @@ function VideoTile({
           style={{ transform: mirror ? "scaleX(-1)" : "none", filter: filterCss }}
         />
       ) : (
-        <div className="w-full h-full grid place-items-center text-white/70 text-sm font-cute">
+        <button
+          onClick={onEnable}
+          className="w-full h-full grid place-items-center text-white/80 text-sm font-cute"
+        >
           <div className="text-center">
             <div className="text-3xl mb-1 animate-floaty">📷</div>
-            waiting…
+            Tap to enable camera
           </div>
-        </div>
+        </button>
       )}
       <div className="absolute bottom-2 left-1/2 -translate-x-1/2 px-3 py-0.5 rounded-full bg-black/45 text-white text-xs font-cute backdrop-blur">
         {speaking ? "🔊 " : ""}
@@ -64,11 +69,6 @@ export function CameraStage() {
   const [count, setCount] = useState<number | null>(null);
   const [flash, setFlash] = useState(false);
   const busy = useRef(false);
-
-  useEffect(() => {
-    if (!room.localStream) room.startMedia(s.settings.cameraId, s.settings.micId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const grab = useCallback(
     (index: number) => {
@@ -149,11 +149,14 @@ export function CameraStage() {
     };
   }, [room, runLoop, grab]);
 
-  const start = () => {
-    if (!room.localStream) {
-      toast("Enable your camera first", "error");
-      room.startMedia(s.settings.cameraId, s.settings.micId);
-      return;
+  const start = async () => {
+    let stream = room.localStream;
+    if (!stream) {
+      stream = await room.startMedia(s.settings.cameraId, s.settings.micId);
+      if (!stream) {
+        toast("Camera/mic permission needed", "error");
+        return;
+      }
     }
     room.emit("session:start");
     runLoop();
@@ -173,6 +176,7 @@ export function CameraStage() {
           label={s.userName}
           speaking={room.localSpeaking && !room.muted}
           filterCss={filterStyle ?? ""}
+          onEnable={() => room.startMedia(s.settings.cameraId, s.settings.micId)}
         />
         <RemoteTile
           stream={room.remoteStream}

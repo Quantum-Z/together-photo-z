@@ -77,6 +77,9 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
   const socketRef = useRef<Socket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const remotePeerId = useRef<string>("");
+  const politeRef = useRef<boolean>(false);
+  const makingOfferRef = useRef<boolean>(false);
+  const sendersRef = useRef<{ audio?: RTCRtpSender; video?: RTCRtpSender }>({});
 
   const [connected, setConnected] = useState(false);
   const [selfId, setSelfId] = useState("");
@@ -90,45 +93,84 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
 
   const startMedia = useCallback((cam?: string, mic?: string) => media.start(cam, mic), [media]);
 
-  // ── WebRTC peer setup ─────────────────────────────────────
+  // ── WebRTC peer setup (perfect-negotiation pattern) ───────
+  // `polite` peers yield on offer collisions. Tracks are (re)added whenever
+  // the local camera becomes available, and onnegotiationneeded renegotiates —
+  // so video connects even when the camera is enabled AFTER the peers join.
   const buildPeer = useCallback(
-    (peerId: string, initiator: boolean) => {
+    (peerId: string, polite: boolean) => {
       pcRef.current?.close();
       const pc = new RTCPeerConnection(ICE);
       pcRef.current = pc;
       remotePeerId.current = peerId;
+      politeRef.current = polite;
+      makingOfferRef.current = false;
       setConnQuality("connecting");
 
-      media.streamRef.current?.getTracks().forEach((t) =>
-        pc.addTrack(t, media.streamRef.current!)
-      );
+      sendersRef.current = {};
+      // Only the offerer pre-creates send/recv transceivers (fires the initial
+      // offer). The answerer inherits matching m-lines from that offer, so both
+      // sides can send video/audio even if a camera turns on later.
+      if (!polite) {
+        const stream = media.streamRef.current;
+        const vTx = pc.addTransceiver("video", { direction: "sendrecv" });
+        const aTx = pc.addTransceiver("audio", { direction: "sendrecv" });
+        sendersRef.current = { video: vTx.sender, audio: aTx.sender };
+        const vTrack = stream?.getVideoTracks()[0];
+        const aTrack = stream?.getAudioTracks()[0];
+        if (vTrack) vTx.sender.replaceTrack(vTrack).catch(() => {});
+        if (aTrack) aTx.sender.replaceTrack(aTrack).catch(() => {});
+      }
 
       const remote = new MediaStream();
       pc.ontrack = (e) => {
-        e.streams[0]?.getTracks().forEach((t) => remote.addTrack(t));
+        remote.addTrack(e.track);
         setRemoteStream(remote);
       };
       pc.onicecandidate = (e) => {
         if (e.candidate)
           socketRef.current?.emit("signal", { to: peerId, data: { candidate: e.candidate } });
       };
-      pc.onconnectionstatechange = () => {
-        const s = pc.connectionState;
-        if (s === "connected") setConnQuality("excellent");
-        else if (s === "disconnected" || s === "failed") setConnQuality("poor");
-        else if (s === "closed") setConnQuality("none");
+      pc.onnegotiationneeded = async () => {
+        try {
+          makingOfferRef.current = true;
+          await pc.setLocalDescription();
+          socketRef.current?.emit("signal", { to: peerId, data: { sdp: pc.localDescription } });
+        } catch {
+          /* ignore */
+        } finally {
+          makingOfferRef.current = false;
+        }
       };
-
-      if (initiator) {
-        pc.createOffer()
-          .then((o) => pc.setLocalDescription(o))
-          .then(() => socketRef.current?.emit("signal", { to: peerId, data: { sdp: pc.localDescription } }))
-          .catch(() => {});
-      }
+      pc.onconnectionstatechange = () => {
+        const st = pc.connectionState;
+        if (st === "connected") setConnQuality("excellent");
+        else if (st === "disconnected") setConnQuality("poor");
+        else if (st === "failed") {
+          setConnQuality("poor");
+          pc.restartIce?.();
+        } else if (st === "closed") setConnQuality("none");
+      };
       return pc;
     },
     [media.streamRef]
   );
+
+  // When the local camera/mic turns on (or the device changes), push the new
+  // tracks into the live peer connection and renegotiate.
+  useEffect(() => {
+    const pc = pcRef.current;
+    const stream = media.stream;
+    if (!pc || !stream) return;
+    // replaceTrack on the pre-created transceivers — no renegotiation needed,
+    // so the partner sees video the instant the camera is enabled.
+    const v = stream.getVideoTracks()[0];
+    const a = stream.getAudioTracks()[0];
+    if (v && sendersRef.current.video && sendersRef.current.video.track !== v)
+      sendersRef.current.video.replaceTrack(v).catch(() => {});
+    if (a && sendersRef.current.audio && sendersRef.current.audio.track !== a)
+      sendersRef.current.audio.replaceTrack(a).catch(() => {});
+  }, [media.stream]);
 
   const joinRoom = useCallback(
     (roomId: string, name: string) => {
@@ -148,7 +190,8 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
       });
       socket.on("room:users", (u: RoomUser[]) => setUsers(u));
 
-      socket.on("peer:new", ({ id }: { id: string }) => buildPeer(id, true));
+      // existing member is the impolite offerer toward the newcomer
+      socket.on("peer:new", ({ id }: { id: string }) => buildPeer(id, false));
       socket.on("peer:left", () => {
         pcRef.current?.close();
         pcRef.current = null;
@@ -156,24 +199,49 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
         setConnQuality("none");
       });
 
-      socket.on("signal", async ({ from, data }: { from: string; data: { sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit } }) => {
-        let pc = pcRef.current;
-        if (!pc || remotePeerId.current !== from) pc = buildPeer(from, false);
-        try {
-          if (data.sdp) {
-            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-            if (data.sdp.type === "offer") {
-              const ans = await pc.createAnswer();
-              await pc.setLocalDescription(ans);
-              socket.emit("signal", { to: from, data: { sdp: pc.localDescription } });
+      socket.on(
+        "signal",
+        async ({ from, data }: { from: string; data: { sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit } }) => {
+          // newcomer creates the peer as polite when the first signal arrives
+          let pc = pcRef.current;
+          if (!pc || remotePeerId.current !== from) pc = buildPeer(from, true);
+          try {
+            if (data.sdp) {
+              const offerCollision =
+                data.sdp.type === "offer" &&
+                (makingOfferRef.current || pc.signalingState !== "stable");
+              if (!politeRef.current && offerCollision) return; // impolite ignores
+              await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+              if (data.sdp.type === "offer") {
+                await pc.setLocalDescription();
+                socket.emit("signal", { to: from, data: { sdp: pc.localDescription } });
+                // answerer: adopt the negotiated senders and attach local media
+                const stream = media.streamRef.current;
+                for (const tx of pc.getTransceivers()) {
+                  const kind = tx.receiver.track?.kind;
+                  if (kind === "video") {
+                    sendersRef.current.video = tx.sender;
+                    const t = stream?.getVideoTracks()[0];
+                    if (t && tx.sender.track !== t) tx.sender.replaceTrack(t).catch(() => {});
+                  } else if (kind === "audio") {
+                    sendersRef.current.audio = tx.sender;
+                    const t = stream?.getAudioTracks()[0];
+                    if (t && tx.sender.track !== t) tx.sender.replaceTrack(t).catch(() => {});
+                  }
+                }
+              }
+            } else if (data.candidate) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+              } catch {
+                /* candidate arrived before remote description — safe to drop */
+              }
             }
-          } else if (data.candidate) {
-            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          } catch {
+            /* ignore signaling races */
           }
-        } catch {
-          /* ignore signaling races */
         }
-      });
+      );
 
       socket.on("room:config", (cfg: Record<string, unknown>) => {
         useBooth.getState().set(cfg as never);
